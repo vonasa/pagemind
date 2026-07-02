@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests
+    runs-on: ubuntu-latest
+
+    # pgvector-enabled Postgres, matching docker/compose.yaml. The suite's
+    # DB-backed tests connect to settings.database_url (default
+    # postgresql://pagemind:pagemind@localhost:5432/pagemind) and skip when it
+    # is unreachable — so bringing this up is what makes them actually run.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: pagemind
+          POSTGRES_USER: pagemind
+          POSTGRES_PASSWORD: pagemind
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pagemind -d pagemind"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Apply migrations
+        run: uv run python -m pagemind.migrations up
+
+      - name: Run tests
+        run: uv run pytest -q
