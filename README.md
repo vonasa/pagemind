@@ -65,7 +65,7 @@ backends are configured independently (`INDEX_BACKEND` / `QUERY_BACKEND`).
 
 - macOS, Apple Silicon (M1 or later)
 - [Homebrew](https://brew.sh)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for Postgres + the embedding server)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for Postgres)
 - [just](https://github.com/casey/just) — task runner
 - [uv](https://docs.astral.sh/uv/) — Python package manager
 
@@ -144,18 +144,31 @@ local Docker setup and doesn't need to be set unless you change ports.
 omlx serve --port 8000
 ```
 
-**Start Postgres + the embedding server** (in another terminal or background):
+**Start Postgres** (Docker) and apply migrations:
 
 ```bash
 just up
 ```
 
-This brings up two Docker containers and applies database migrations:
+This brings up **Postgres 17** with pgvector on port `5432` and runs the database
+migrations.
 
-- **Postgres 17** with pgvector on port `5432`
-- **Infinity** serving `infgrad/Jasper-Token-Compression-600M` on port `7997`
-  — the embedding model (~2.2 GB) downloads automatically on first run; expect a
-  few minutes while the container reaches healthy.
+**Start the embedding server** — [Infinity](https://github.com/michaelf34/infinity),
+run **natively** on the host (not Docker):
+
+```bash
+just embed
+```
+
+This serves `infgrad/Jasper-Token-Compression-600M` on port `7997`. The first run
+creates a dedicated Python venv (via `uv`) and downloads the model (~2.2 GB), so
+expect a few minutes; it then runs in the background and the command returns once
+the server is healthy. Logs go to `.infinity/run.log`.
+
+> Infinity runs natively rather than in Docker: on Apple Silicon the published
+> image runs under QEMU emulation and needs library versions the upstream image
+> doesn't ship, so the native path is both faster and more reliable. `just embed`
+> handles the venv and pinned dependencies for you.
 
 ---
 
@@ -200,7 +213,7 @@ any running services.
 
 ```bash
 omlx stop          # or Ctrl-C in the omlx terminal
-just down          # stop Docker containers (data volumes are preserved)
+just down          # stop the embedding server + Postgres (data volumes are preserved)
 ```
 
 ---

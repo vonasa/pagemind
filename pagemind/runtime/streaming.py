@@ -110,7 +110,10 @@ async def ask_stream(
         recipe = await route(chat, search_question)
 
         if recipe in _NON_SEARCH_RECIPES:
-            yield _sse({"type": "step", "text": "Looking up…"})
+            # structured_view reads several scenes before answering (no token stream on
+            # this path), so flag the longer wait; the others are quick lookups.
+            step = "Reading the key scenes…" if recipe == "structured_view" else "Looking up…"
+            yield _sse({"type": "step", "text": step})
             from pagemind.recipes import dispatch
             result = await dispatch(recipe, conn, chat, book_id, search_question, up_to_chapter=up_to_chapter)
             if result.weak:
