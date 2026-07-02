@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: pagemind
+      POSTGRES_USER: pagemind
+      POSTGRES_PASSWORD: pagemind
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pagemind -d pagemind"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Containerised embedding server — DISABLED by default (behind the
+  # "docker-embed" profile) because the native path is preferred: `just embed`.
+  # On arm64 macOS this image runs under QEMU and needs a Colima VM with ~6 GiB+
+  # RAM (the default 2 GiB OOM-kills it). To use it as a fallback:
+  #   docker compose -f docker/compose.yaml --profile docker-embed up -d infinity
+  infinity:
+    profiles: ["docker-embed"]
+    image: pagemind-infinity:qwen3
+    build:
+      context: .
+      dockerfile: infinity.Dockerfile
+    command:
+      - v2
+      - --model-id
+      - infgrad/Jasper-Token-Compression-600M
+      - --served-model-name
+      - Jasper-Token-Compression-600M
+      - --port
+      - "7997"
+      - --device
+      - cpu
+      - --engine
+      - torch
+      - --no-bettertransformer
+      - --url-prefix
+      - /v1
+    ports:
+      - "7997:7997"
+    environment:
+      HF_HOME: /model_cache
+    volumes:
+      - hf_cache:/model_cache
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7997/health 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Allow extra time for first-run model download (~2.2 GB)
+      start_period: 300s
+
+volumes:
+  pgdata:
+  hf_cache:

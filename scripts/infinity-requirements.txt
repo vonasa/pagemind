@@ -1,0 +1,17 @@
+# Pinned dependencies for the native (non-Docker) Infinity embedding server.
+# Used by scripts/run-infinity.sh. See CLAUDE.local.md for the full rationale.
+#
+# Why these pins:
+#   transformers 4.57.1  — qwen3 architecture support (infgrad/Jasper-Token-
+#                          Compression-600M); the version baked into the
+#                          michaelf34/infinity image is too old (KeyError: 'qwen3').
+#   click <8.2           — click >=8.2 breaks infinity's pinned typer 0.12.5
+#                          ("Secondary flag is not valid for non-boolean flag").
+#   [server,torch] only  — deliberately NOT [all]: that pulls optimum/colpali,
+#                          which pin transformers <4.48 and fight the upgrade above.
+infinity-emb[server,torch]==0.0.77
+transformers==4.57.1
+click<8.2
+torch==2.12.1
+sentence-transformers==3.4.1
+einops==0.8.2

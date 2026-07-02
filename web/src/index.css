@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+/* ── Design tokens (single source of truth) ──────────────────────────────────
+   Warm-paper editorial palette. Literal values live here in @theme so Tailwind
+   can generate utilities (bg-surface, text-muted, font-display, shadow-card, …)
+   and compute opacity variants correctly. Legacy semantic vars below alias into
+   these, so the app's inline `var(--…)` styles read the same source.            */
+@theme {
+  --color-bg: #FBF7EF;          /* warm paper */
+  --color-surface: #FFFFFF;     /* cards / raised */
+  --color-sand: #F3ECDD;        /* sunken / input fills */
+  --color-line: #E4D8C2;        /* subtle hairline divider */
+  --color-edge: #A89468;        /* visible boundary (~3:1 on white) */
+  --color-ink: #2A251E;         /* body text */
+  --color-muted: #5E5443;       /* secondary text (≥4.5:1 on paper & sand) */
+  --color-accent: #A84B25;      /* terracotta (white text ≈5.7:1) */
+  --color-accent-hover: #8F3D1D;
+  --color-success: #3F7D4E;
+  --color-warning: #B4791C;
+  --color-danger: #B23B2E;
+
+  --font-display: "Fraunces Variable", Georgia, "Times New Roman", serif;
+  --font-ui: "Inter Variable", system-ui, -apple-system, sans-serif;
+
+  --radius-lg: 14px;
+  --shadow-card: 0 1px 2px rgba(43, 38, 30, 0.06), 0 10px 28px rgba(43, 38, 30, 0.08);
+  --shadow-card-hover: 0 2px 6px rgba(43, 38, 30, 0.08), 0 18px 40px rgba(43, 38, 30, 0.14);
+  --shadow-pop: 0 12px 40px rgba(43, 38, 30, 0.22);
+}
+
+/* Legacy semantic aliases — every existing inline style references these.
+   Repointing them here flips the whole app to the paper palette at once. */
+:root {
+  --bg: var(--color-bg);
+  --surface: var(--color-surface);
+  --surface2: var(--color-sand);
+  --border: var(--color-line);
+  --border-strong: var(--color-edge);
+  --text: var(--color-ink);
+  --text-muted: var(--color-muted);
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-hover);
+  --accent-weak: rgba(168, 75, 37, 0.10);   /* replaces old indigo #6366f1xx tints */
+  --highlight: #F6D68A;                      /* butter <mark>, readable dark ink */
+  --success: var(--color-success);
+  --warning: var(--color-warning);
+  --danger: var(--color-danger);
+  --radius: 8px;
+
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── Base element styling (preserved from the original, retuned for paper) ──── */
+@layer base {
+  body { min-height: 100dvh; }
+
+  h1, h2, h3, h4 { font-family: var(--font-display); }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); }
+
+  button {
+    cursor: pointer;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+  }
+
+  input, textarea {
+    font: inherit;
+    background: var(--surface2);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  input::placeholder, textarea::placeholder { color: var(--text-muted); }
+
+  /* Visible keyboard focus ring app-wide (the app had none). */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+/* Scrollbar — warm to match paper */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* Spinner */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 18px; height: 18px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+/* Pulse for loading books */
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+/* Info icon with hover/focus tooltip */
+.info {
+  position: relative;
+  display: inline-flex;
+  cursor: help;
+  outline: none;
+}
+.info > .info-bubble {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  box-shadow: var(--shadow-pop);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s;
+  z-index: 20;
+  pointer-events: none;
+}
+.info:hover > .info-bubble,
+.info:focus-visible > .info-bubble {
+  opacity: 1;
+  visibility: visible;
+}

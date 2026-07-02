@@ -1,0 +1,45 @@
+# Local-only working files (plans, scratch, personal notes, secrets).
+# Anything named *.local.* is never committed.
+*.local.*
+
+# Local-only material: source books, private/unrelated files, scratch.
+# Put anything you don't want published under local/.
+local/
+
+# Architecture decision records — internal design process, not published.
+docs/decisions/
+
+# Python
+.venv/
+# Native embedding server: dedicated venv + HF model cache (see scripts/run-infinity.sh)
+.infinity/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# Node / web build
+node_modules/
+web/dist/
+web/.vite/
+
+# Environment / secrets
+.env
+*.local.env
+
+# Editor & OS
+.DS_Store
+.idea/
+.vscode/
+.claude/
+*.swp
+
+# Pre-compiled DB dumps from `just export-db` (can be large; move/share manually)
+*.dump
+
+# Docker data volumes are managed by Docker; ignore local bind-mount paths if any
