@@ -173,6 +173,30 @@ class _FakeChat:
         return "A concise summary."
 
 
+class _WrongOffsetChat(_FakeChat):
+    """Emits valid entity/date substrings but hallucinated, out-of-range offsets —
+    the local-model failure mode that _resolve_offset must recover from."""
+
+    async def complete(self, messages, max_tokens=1024, **kwargs):
+        user = messages[-1]["content"]
+        if "Cluster names" in user:
+            self.cluster_calls += 1
+            return '{"entities": [{"canonical": "Alice", "type": "character", "aliases": []}]}'
+        if "Extract structured information" in user:
+            self.section_calls += 1
+            passage = user.split("chars):\n", 1)[1]
+            date_tok = "morning" if "morning" in passage else "dusk"
+            return (
+                '{"entities": [{"name": "Alice", "type": "character",'
+                ' "offset_start": 99999, "offset_end": 100004}],'
+                f' "dates": [{{"raw_text": "{date_tok}", "normalized": null,'
+                ' "offset_start": 88888, "offset_end": 88895}],'
+                ' "events": []}'
+            )
+        self.summary_calls += 1
+        return "A concise summary."
+
+
 class _FakeEmbed:
     def __init__(self):
         self.batches = 0
@@ -293,3 +317,69 @@ async def test_entities_resume_reuses_payloads_and_no_orphans(conn, monkeypatch)
     assert conn.execute(
         "SELECT name FROM entities WHERE book_id = %s", (book_id,)
     ).fetchone()[0] == "Alice Liddell"
+
+
+@pytest.mark.asyncio
+async def test_entities_recover_from_hallucinated_offsets(conn, monkeypatch):
+    """Occurrences and dates still materialize when the model's offsets are wrong:
+    _resolve_offset relocates the exact substring. Guards against the regression
+    where every occurrence/date was silently dropped (empty co-occurrence graph)."""
+    from pagemind.precompute.entities import extract_entities
+
+    ids = _make_book(conn)
+    book_id = ids["book_id"]
+    _WrongOffsetChat.install(monkeypatch)
+
+    await extract_entities(conn, book_id, progress=None)
+
+    n_occ = conn.execute(
+        "SELECT count(*) FROM occurrences WHERE book_id = %s", (book_id,)
+    ).fetchone()[0]
+    n_dates = conn.execute(
+        "SELECT count(*) FROM dates WHERE book_id = %s", (book_id,)
+    ).fetchone()[0]
+    assert n_occ == 2    # Alice recovered in both sections despite bad offsets
+    assert n_dates == 2  # one date per section, recovered by substring search
+    # The stored offset points at the real substring, not the hallucinated 99999.
+    off = conn.execute(
+        """
+        SELECT o.char_offset_start, o.char_offset_end
+        FROM occurrences o JOIN chapters c ON c.chapter_id = o.chapter_id
+        WHERE o.book_id = %s ORDER BY c.ordinal LIMIT 1
+        """,
+        (book_id,),
+    ).fetchone()
+    assert off == (0, 5)  # "Alice" at the start of section 0
+
+
+class TestResolveOffset:
+    def test_trusts_valid_model_offset(self):
+        from pagemind.precompute.entities import _resolve_offset
+        content = "Alice walked to London."
+        assert _resolve_offset(content, "Alice", 0, 5) == (0, 5)
+
+    def test_recovers_from_wrong_offset(self):
+        from pagemind.precompute.entities import _resolve_offset
+        content = "Alice walked to London."
+        i = content.index("London")
+        assert _resolve_offset(content, "London", 999, 1004) == (i, i + len("London"))
+
+    def test_recovers_when_offset_missing(self):
+        from pagemind.precompute.entities import _resolve_offset
+        content = "Alice walked to London."
+        i = content.index("London")
+        assert _resolve_offset(content, "London", None, None) == (i, i + len("London"))
+
+    def test_case_insensitive_recovery(self):
+        from pagemind.precompute.entities import _resolve_offset
+        content = "Alice walked to London."
+        assert _resolve_offset(content, "alice", 999, 1004) == (0, len("alice"))
+
+    def test_absent_name_returns_none(self):
+        from pagemind.precompute.entities import _resolve_offset
+        assert _resolve_offset("Alice walked to London.", "Zorro", 0, 5) is None
+
+    def test_empty_name_matches_at_zero_so_caller_must_guard(self):
+        # find("") == 0, so callers MUST reject empty names before calling.
+        from pagemind.precompute.entities import _resolve_offset
+        assert _resolve_offset("anything", "", None, None) == (0, 0)

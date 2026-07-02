@@ -605,14 +605,67 @@ class TestGenericFallbackRecipe:
 # ── Recipe: structured_view ───────────────────────────────────────────────────
 
 class TestStructuredViewRecipe:
-    async def test_returns_entity_summary(self, db_book):
+    async def test_reader_enriched_narrative(self, db_book):
+        from pagemind.recipes.structured_view import run
+        conn, book_id, ids = db_book
+        # Give Alice a scene-mate in s0 so exactly one edge / one shared section exists.
+        bob_id = conn.execute(
+            """
+            INSERT INTO entities (book_id, name, entity_type)
+            VALUES (%s, 'Bob', 'PERSON') RETURNING entity_id
+            """,
+            (book_id,),
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO occurrences (book_id, entity_id, chapter_id, section_id,
+                                     char_offset_start, char_offset_end, context)
+            VALUES (%s, %s, %s, %s, 0, 3, 'Bob')
+            """,
+            (book_id, bob_id, ids["ch0"], ids["s0"]),
+        )
+        conn.commit()
+
+        reader_json = json.dumps({
+            "answer": "Alice and Bob explore Wonderland together.",
+            "verbatim_quotes": ["Alice explores Wonderland"],  # substring of s0
+        })
+        synth = "Alice and Bob are companions who share the opening scene."
+
+        async def mock_complete(messages, max_tokens=1024, **kw):
+            # Reader prompts contain PASSAGE; the synthesis prompt must not.
+            user = messages[-1]["content"]
+            return reader_json if "PASSAGE" in user else synth
+
+        chat = MagicMock()
+        chat.complete = AsyncMock(side_effect=mock_complete)
+
+        result = await run(conn, chat, book_id, "how are the characters connected?")
+        # The synthesis (non-PASSAGE call) is returned; a reader ran first.
+        assert result.text == synth
+        assert not result.weak
+        # The shared section was read → cited, and its verbatim quote carried for the UI.
+        assert any(c.section_id == ids["s0"] for c in result.citations)
+        assert any(q.text == "Alice explores Wonderland" for q in result.quotes)
+        # Exactly one synthesis call, whose evidence names both characters and never
+        # contains "PASSAGE" (which would have mis-branched to the reader path).
+        synth_calls = [
+            c for c in chat.complete.await_args_list
+            if "PASSAGE" not in c.args[0][-1]["content"]
+        ]
+        assert len(synth_calls) == 1
+        evidence = synth_calls[0].args[0][-1]["content"]
+        assert "Alice" in evidence and "Bob" in evidence
+        assert "PASSAGE" not in evidence
+
+    async def test_no_cooccurrence_is_weak(self, db_book):
+        # Single indexed entity (Alice) → no pairs → weak, defers to fallback.
         from pagemind.recipes.structured_view import run
         conn, book_id, _ = db_book
         chat = _mock_chat("unused")
         result = await run(conn, chat, book_id, "map the relationships")
-        # Should mention Alice (the only indexed entity)
-        assert "Alice" in result.text
-        assert "PERSON" in result.text.upper() or "person" in result.text.lower()
+        assert result.weak
+        chat.complete.assert_not_awaited()
 
     async def test_no_entities_message(self, db_book):
         from pagemind.recipes.structured_view import run, _get_all_entities
@@ -634,6 +687,67 @@ class TestStructuredViewRecipe:
         finally:
             conn.execute("DELETE FROM book_meta WHERE book_id = %s", (empty_book_id,))
             conn.commit()
+
+
+# ── structured_view: pure graph helpers (no DB) ───────────────────────────────
+
+class TestCooccurrenceGraph:
+    def _ent(self, name, sids, etype="PERSON"):
+        return {"name": name, "entity_type": etype, "aliases": [], "section_ids": sids}
+
+    def test_build_cooccurrence_dedups_and_ranks(self):
+        from pagemind.recipes.structured_view import _build_cooccurrence
+        s1, s2, s3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        entities = [
+            # A appears TWICE in s1 (duplicate section) and once in s2, s3.
+            self._ent("A", [s1, s1, s2, s3]),
+            self._ent("B", [s1, s2]),   # shares s1, s2 with A → count 2
+            self._ent("C", [s3]),       # shares s3 with A → count 1
+        ]
+        edges, sec_to_ents = _build_cooccurrence(entities)
+        by_pair = {(a, b): (count, sids) for a, b, count, sids in edges}
+        # Duplicate s1 for A does not inflate the A–B count.
+        assert by_pair[("A", "B")][0] == 2
+        assert by_pair[("A", "B")][1] == frozenset({s1, s2})
+        assert by_pair[("A", "C")][0] == 1
+        # Sorted by count desc: A–B (2) before A–C (1).
+        assert edges[0][:2] == ("A", "B")
+        # Section→entities map is deduped per section.
+        assert sec_to_ents[s1] == {"A", "B"}
+
+    def test_build_cooccurrence_tiebreak_is_deterministic(self):
+        from pagemind.recipes.structured_view import _build_cooccurrence
+        s1, s2 = uuid.uuid4(), uuid.uuid4()
+        # Three pairs all at count 1 → order must be a stable (name_a, name_b) sort.
+        entities = [
+            self._ent("Bob", [s1]),
+            self._ent("Ann", [s1]),
+            self._ent("Cy", [s2]),
+            self._ent("Ann2", [s2]),
+        ]
+        edges, _ = _build_cooccurrence(entities)
+        names = [(a, b) for a, b, _c, _s in edges]
+        assert names == sorted(names)  # deterministic alphabetical tiebreak
+
+    def test_select_read_sections_prioritises_then_caps(self):
+        from pagemind.recipes.structured_view import _select_read_sections
+        edge_sec, both_sec, event_sec = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        top_edges = [
+            ("A", "B", 2, frozenset({edge_sec, both_sec})),
+            ("A", "C", 1, frozenset({both_sec})),  # both_sec supports 2 edges
+        ]
+        sec_to_ents = {both_sec: {"A", "B", "C"}, edge_sec: {"A", "B"}}
+        events = [event_sec, both_sec]
+
+        # Full budget → all three candidates, ranked: edge∩event first, then
+        # edge-central by support, then event-only.
+        chosen = _select_read_sections(top_edges, sec_to_ents, events, max_reads=3)
+        assert chosen == [both_sec, edge_sec, event_sec]
+
+        # Tight budget → capped, lowest-priority (event-only) dropped.
+        capped = _select_read_sections(top_edges, sec_to_ents, events, max_reads=2)
+        assert capped == [both_sec, edge_sec]
+        assert event_sec not in capped
 
 
 # ── Recipe: contextual_why (multi-hop) ────────────────────────────────────────

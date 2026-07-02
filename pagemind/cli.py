@@ -227,10 +227,82 @@ def _backfill_summaries() -> None:
         print("Done.")
 
 
+def _reindex_entities(book_id_str: str | None = None) -> None:
+    """Re-run only the entities stage, reusing the cached per-section payloads.
+
+    The entities stage does per-section NER (the expensive LLM pass) once and stores
+    each section's extraction durably in the checkpoint ledger. Re-materialising just
+    the back half (alias clustering + occurrence/date/event build) therefore costs a
+    single clustering call, not a full re-ingest. Used to apply materialisation-side
+    fixes — e.g. offset-recovery for occurrences/dates — to already-compiled books.
+
+    Deleting the entities '*' sentinel makes run_precompute re-run that stage; it
+    reloads the payloads (front half skipped) and extract_entities atomically rebuilds
+    entities/occurrences/dates/events. Other stages keep their sentinels and are skipped.
+    """
+    from pagemind.db import get_conn
+    from pagemind.precompute import run_precompute
+
+    with get_conn() as conn:
+        if book_id_str is not None:
+            try:
+                targets = [(uuid.UUID(book_id_str), None)]
+            except ValueError:
+                print(f"error: invalid book_id {book_id_str!r} (must be a UUID)", file=sys.stderr)
+                sys.exit(1)
+        else:
+            targets = conn.execute(
+                "SELECT book_id, title FROM book_meta WHERE status = 'ready' ORDER BY created_at"
+            ).fetchall()
+
+        if not targets:
+            print("No ready books to reindex.")
+            return
+
+        for book_id, title in targets:
+            # Guard: payloads must exist, or this would silently produce nothing
+            # (the front half would have no cached extractions to reuse).
+            n_payloads = conn.execute(
+                "SELECT count(*) FROM precompute_checkpoints "
+                "WHERE book_id = %s AND stage = 'entities' AND unit_key <> '*'",
+                (book_id,),
+            ).fetchone()[0]
+            if n_payloads == 0:
+                print(f"  {title or book_id}: no cached entity payloads — use `add --reindex` instead. Skipping.")
+                continue
+
+            print(f"Reindexing entities: {title or book_id} ({book_id}) …")
+            conn.execute(
+                "DELETE FROM precompute_checkpoints "
+                "WHERE book_id = %s AND stage = 'entities' AND unit_key = '*'",
+                (book_id,),
+            )
+            conn.commit()
+
+            on_stage, on_tick, finish = _make_progress()
+            try:
+                asyncio.run(run_precompute(conn, book_id, on_stage=on_stage, on_tick=on_tick))
+            except Exception as exc:
+                finish()
+                print(f"    error: {exc}", file=sys.stderr)
+                continue
+            finish()
+
+            n_occ, n_dates = conn.execute(
+                """
+                SELECT (SELECT count(*) FROM occurrences WHERE book_id = %(b)s),
+                       (SELECT count(*) FROM dates       WHERE book_id = %(b)s)
+                """,
+                {"b": book_id},
+            ).fetchone()
+            print(f"    {n_occ} occurrences  |  {n_dates} dates")
+        print("Done.")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         print("usage: pagemind <command> [args...]")
-        print("commands: add, ask, backfill-summaries")
+        print("commands: add, ask, backfill-summaries, reindex-entities")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -250,6 +322,9 @@ def main() -> None:
         _ask(sys.argv[2], " ".join(sys.argv[3:]))
     elif cmd == "backfill-summaries":
         _backfill_summaries()
+    elif cmd == "reindex-entities":
+        positionals = [a for a in sys.argv[2:] if not a.startswith("--")]
+        _reindex_entities(positionals[0] if positionals else None)
     else:
         print(f"unknown command: {cmd!r}", file=sys.stderr)
         sys.exit(1)

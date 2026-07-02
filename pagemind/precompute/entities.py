@@ -103,6 +103,25 @@ def _offset_valid(content: str, name: str, start: int, end: int) -> bool:
     return nl in el or el in nl
 
 
+def _resolve_offset(
+    content: str, name: str, start: object, end: object
+) -> tuple[int, int] | None:
+    """Recover a valid (start, end) for *name* within *content*.
+
+    Local models routinely hallucinate character offsets, so trust the model's
+    numbers only if they validate; otherwise fall back to locating the exact
+    substring (the extraction prompt requires *name* to be a verbatim substring).
+    Returns None when the name cannot be found at all. Callers must guard against
+    an empty *name* first — content.find("") returns 0 and would fabricate a row.
+    """
+    if isinstance(start, int) and isinstance(end, int) and _offset_valid(content, name, start, end):
+        return start, end
+    idx = content.lower().find(name.lower())
+    if idx != -1:
+        return idx, idx + len(name)
+    return None
+
+
 def _context_snippet(content: str, start: int, end: int, window: int = 40) -> str:
     return content[max(0, start - window) : end + window]
 
@@ -272,12 +291,14 @@ async def extract_entities(
 
             for ent in info["entities"]:
                 name = str(ent.get("name", "")).strip()
-                start = ent.get("offset_start")
-                end = ent.get("offset_end")
-                if not name or start is None or end is None:
+                if not name:
                     continue
-                if not _offset_valid(content, name, int(start), int(end)):
+                off = _resolve_offset(
+                    content, name, ent.get("offset_start"), ent.get("offset_end")
+                )
+                if off is None:
                     continue
+                start, end = off
                 entity_id = _resolve(name)
                 if entity_id is None:
                     continue
@@ -290,20 +311,22 @@ async def extract_entities(
                     """,
                     (
                         book_id, entity_id, chapter_id, section_id,
-                        global_off + int(start),
-                        global_off + int(end),
-                        _context_snippet(content, int(start), int(end)),
+                        global_off + start,
+                        global_off + end,
+                        _context_snippet(content, start, end),
                     ),
                 )
 
             for d in info["dates"]:
                 raw_text = str(d.get("raw_text", "")).strip()
-                start = d.get("offset_start")
-                end = d.get("offset_end")
-                if not raw_text or start is None or end is None:
+                if not raw_text:
                     continue
-                if not _offset_valid(content, raw_text, int(start), int(end)):
+                off = _resolve_offset(
+                    content, raw_text, d.get("offset_start"), d.get("offset_end")
+                )
+                if off is None:
                     continue
+                start, end = off
                 normalized = d.get("normalized") or None
                 conn.execute(
                     """
@@ -315,9 +338,9 @@ async def extract_entities(
                     (
                         book_id, chapter_id, section_id, raw_text,
                         normalized,
-                        global_off + int(start),
-                        global_off + int(end),
-                        _context_snippet(content, int(start), int(end)),
+                        global_off + start,
+                        global_off + end,
+                        _context_snippet(content, start, end),
                     ),
                 )
 
