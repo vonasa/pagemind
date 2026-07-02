@@ -1037,11 +1037,107 @@ class TestSelectQuotes:
         select_quotes([r], want=2)
         assert r.verbatim_quotes == before_q and r.char_offsets == before_o
 
+    def test_higher_want_keeps_more_than_three(self):
+        """The old hard cap was 3; want=7 must surface up to 7 distinct quotes."""
+        from pagemind.runtime.quotes import select_quotes
+        r1 = self._rr([f"q{i}" for i in range(4)], [(i, i + 1) for i in range(4)])
+        r2 = self._rr([f"p{i}" for i in range(4)], [(i, i + 1) for i in range(4)])
+        out = select_quotes([r1, r2], want=7)
+        kept = [q for r in out for q in r.verbatim_quotes]
+        assert len(kept) == 7
+
+    def test_want_exceeds_supply_returns_all_without_error(self):
+        """Requesting 7 when only 4 exist returns the 4, not an error or padding."""
+        from pagemind.runtime.quotes import select_quotes
+        r = self._rr(["a", "b", "c", "d"], [(0, 1), (1, 2), (2, 3), (3, 4)])
+        out = select_quotes([r], want=7)
+        assert [q for rr in out for q in rr.verbatim_quotes] == ["a", "b", "c", "d"]
+
     def test_format_quote_answer(self):
         from pagemind.runtime.quotes import format_quote_answer
         assert "couldn't" in format_quote_answer(0).lower()
         assert format_quote_answer(1).count("passage") == 1
         assert "loosely" in format_quote_answer(3, weak=True).lower()
+
+
+# ── requested-quote-count parsing + planning ──────────────────────────────────
+
+class TestQuoteCountParsing:
+    @pytest.mark.parametrize("question, expected", [
+        ("7 quotes describing warmth", 7),
+        ("seven passages", 7),
+        ("give me 5 lines", 5),
+        ("7 warm moments", 7),            # up to two adjectives between count and noun
+        ("find twelve quotes", 12),
+        ("50 quotes", 50),               # pure extractor: no clamping here
+        ("7 quotes from chapter 3", 7),  # count precedes chapter ref → still 7
+        # False-positive traps: no count anchored to a quote noun.
+        ("quotes about love", None),
+        ("quotes from chapter 3", None),
+        ("summarize chapter 3", None),
+        ("chapter 7 quotes about warmth", None),  # chapter number is not a count
+    ])
+    def test_parse(self, question, expected):
+        from pagemind.runtime.quotes import parse_requested_quote_count
+        assert parse_requested_quote_count(question) == expected
+
+    @pytest.mark.parametrize("requested, expected", [
+        (7, (7, 10)),      # want + margin
+        (50, (12, 10)),    # both clamped to _MAX_QUOTES / _MAX_SECTIONS
+        (1, (1, 4)),
+        (0, (3, 3)),       # non-positive → defaults
+        (None, (3, 3)),    # no count → today's behaviour preserved
+    ])
+    def test_plan(self, requested, expected):
+        from pagemind.runtime.quotes import plan_quotes
+        assert plan_quotes(requested) == expected
+
+
+class TestQuoteCountWiring:
+    """The count must actually reach retrieval — widen sections read, not just cap."""
+
+    async def _run(self, monkeypatch, question):
+        import pagemind.runtime.streaming as sm
+
+        captured: dict = {}
+
+        async def fake_route(chat, q):
+            return "verbatim_quote"  # a search-path recipe
+
+        async def fake_hybrid(conn, book_id, q, *, top_k=5, up_to_chapter=None):
+            captured["top_k"] = top_k
+            return [(uuid.uuid4(), 1.0 - i * 0.01) for i in range(top_k)]
+
+        async def fake_fan_out(conn, chat, section_ids, q, *, grounded=True):
+            captured["n_sections"] = len(section_ids)
+            return [ReadResult(section_id=section_ids[0], chapter=1, answer="ans")]
+
+        async def fake_stream(messages, max_tokens=512):
+            yield "final answer"
+
+        fake_chat = MagicMock()
+        fake_chat.stream_complete = fake_stream
+
+        monkeypatch.setattr(sm.ChatClient, "from_config", classmethod(lambda cls, axis="query": fake_chat))
+        monkeypatch.setattr(sm, "route", fake_route)
+        monkeypatch.setattr(sm, "hybrid_search", fake_hybrid)
+        monkeypatch.setattr(sm, "fan_out", fake_fan_out)
+
+        async for _ in sm.ask_stream(None, uuid.uuid4(), question, history=[]):
+            pass
+        return captured
+
+    async def test_explicit_count_widens_sections(self, monkeypatch):
+        captured = await self._run(monkeypatch, "7 quotes describing warmth")
+        # plan_quotes(7) → n_sections=10; both top_k and the slice must scale up.
+        assert captured["top_k"] == 10
+        assert captured["n_sections"] == 10
+
+    async def test_no_count_keeps_default_three(self, monkeypatch):
+        captured = await self._run(monkeypatch, "quotes about warmth")
+        # Unchanged from prior behaviour: top_k=max(5,3)=5, slice to 3.
+        assert captured["top_k"] == 5
+        assert captured["n_sections"] == 3
 
 
 # ── weak-signal fallback: summaries-only path ─────────────────────────────────

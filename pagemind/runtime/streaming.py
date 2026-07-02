@@ -12,15 +12,13 @@ from pagemind.models.chat import ChatClient
 from pagemind.retrieval import hybrid_search
 from pagemind.runtime.fallback import stream_summary_fallback
 from pagemind.runtime.history import condense_question
-from pagemind.runtime.quotes import select_quotes
+from pagemind.runtime.quotes import parse_requested_quote_count, plan_quotes, select_quotes
 from pagemind.runtime.reader import fan_out
 from pagemind.runtime.router import route
 from pagemind.runtime.synthesizer import answer_prompts as _answer_prompts, format_evidence as _format_evidence, build_output as _build_output
 from pagemind.runtime.types import QueryResult
 
 _NON_SEARCH_RECIPES = frozenset(("chapter_summary", "locate_entity", "structured_view"))
-_TOP_SECTIONS = 3
-_WANT_QUOTES = 3
 
 
 def _result_to_dict(result: QueryResult) -> dict:
@@ -129,9 +127,19 @@ async def ask_stream(
             return
 
         # Search-based path (fact_lookup, verbatim_quote, contextual_why, generic_fallback)
+        # Honour an explicit quote count ("7 quotes…"). Parse both the raw and the
+        # condensed question — condense_question isn't told to preserve counts, so a
+        # follow-up's number can survive only in the raw text. Widen retrieval to
+        # match; with no count this reproduces the prior 3-section / want-3 behaviour.
+        requested = max(
+            (parse_requested_quote_count(q) or 0 for q in (question, search_question)),
+            default=0,
+        ) or None
+        want, n_sections = plan_quotes(requested)
+
         yield _sse({"type": "step", "text": "Searching passages…"})
-        hits = await hybrid_search(conn, book_id, search_question, top_k=5, up_to_chapter=up_to_chapter)
-        section_ids = [sid for sid, _ in hits[:_TOP_SECTIONS]]
+        hits = await hybrid_search(conn, book_id, search_question, top_k=max(5, n_sections), up_to_chapter=up_to_chapter)
+        section_ids = [sid for sid, _ in hits[:n_sections]]
 
         if not section_ids:
             # No passages matched — answer from the chapter summaries instead.
@@ -177,7 +185,7 @@ async def ask_stream(
             yield _sse({"type": "token", "text": chunk})
 
         final = _build_output(
-            book_id, search_question, full_text.strip(), select_quotes(results, want=_WANT_QUOTES)
+            book_id, search_question, full_text.strip(), select_quotes(results, want=want)
         )
         yield _sse({"type": "done", "result": _result_to_dict(final)})
     except (httpx.HTTPError, ConnectionError) as exc:
