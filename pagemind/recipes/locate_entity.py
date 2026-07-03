@@ -23,6 +23,25 @@ _STRIP_SUFFIXES = re.compile(
 _CAPITALIZED_RE = re.compile(r"\b[A-Z][a-zA-Z'-]+\b")
 
 
+def _section_chapter_number(conn: psycopg.Connection, section_id: uuid.UUID) -> int:
+    """Return the display chapter *number* for a section (0 if unresolved).
+
+    Occurrences reference body sections, whose chapter always carries a ``number``, so
+    the ``0`` fallback is only a defensive sentinel — it keeps ``Citation.chapter`` a
+    non-null int instead of the old hard-coded ``0`` placeholder.
+    """
+    row = conn.execute(
+        """
+        SELECT c.number
+        FROM sections s
+        JOIN chapters c ON c.chapter_id = s.chapter_id
+        WHERE s.section_id = %s
+        """,
+        (section_id,),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
 def _extract_entity_name(question: str) -> str:
     """Heuristically extract the entity name from a locate_entity query."""
     s = _STRIP_PREFIXES.sub("", question).strip()
@@ -60,9 +79,12 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> QueryResult:
     entity_name = _extract_entity_name(question)
-    entities = lookup_entities(conn, book_id, entity_name, up_to_chapter=up_to_chapter)
+    entities = lookup_entities(
+        conn, book_id, entity_name, up_to_chapter=up_to_chapter, chapter=chapter
+    )
     text = _format_occurrences(entity_name, entities)
 
     citations: list[Citation] = []
@@ -71,8 +93,11 @@ async def run(
         for occ in ent["occurrences"]:
             sid = occ["section_id"]
             if sid and sid not in seen:
-                # chapter is unknown here without an extra query; use 0 as placeholder
-                citations.append(Citation(book_id=book_id, chapter=0, section_id=sid))
+                citations.append(Citation(
+                    book_id=book_id,
+                    chapter=_section_chapter_number(conn, sid),
+                    section_id=sid,
+                ))
                 seen.add(sid)
 
     # No citations means the structured index had nothing usable for this query

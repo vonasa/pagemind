@@ -172,17 +172,23 @@ def _locate_quote(source: str, quote: str) -> tuple[str, int, int] | None:
 
 
 def _section_chapter(conn: psycopg.Connection, section_id: uuid.UUID) -> int:
-    """Return chapter ordinal for a section, defaulting to 0 if not found."""
+    """Return the display chapter *number* for a section, defaulting to 0 if not found.
+
+    Retrieval only surfaces body sections (see the ``is_body`` filters in
+    lexical/semantic search), and every body chapter has a non-NULL ``number``, so a
+    cited section always resolves to a real chapter number. The ``0`` fallback is only
+    the genuine "section not found" sentinel.
+    """
     row = conn.execute(
         """
-        SELECT c.ordinal
+        SELECT c.number
         FROM sections s
         JOIN chapters c ON c.chapter_id = s.chapter_id
         WHERE s.section_id = %s
         """,
         (section_id,),
     ).fetchone()
-    return row[0] if row else 0
+    return row[0] if row and row[0] is not None else 0
 
 
 async def read(

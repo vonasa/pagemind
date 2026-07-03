@@ -6,6 +6,8 @@ from typing import Any
 
 import psycopg
 
+from pagemind.retrieval.scope import chapter_scope_clause, chapter_scope_params
+
 
 # ── Chapter ───────────────────────────────────────────────────────────────────
 
@@ -14,12 +16,17 @@ def get_chapter(
     book_id: uuid.UUID,
     chapter_n: int,
 ) -> dict[str, Any] | None:
-    """Return chapter metadata for ordinal *chapter_n*, or None if not found."""
+    """Return metadata for the body chapter whose display *number* is *chapter_n*.
+
+    Keyed on the human-facing 1-based ``number`` (not the internal ``ordinal``), so a
+    user typing "chapter 3" resolves to the chapter shown as "Chapter 3". Non-body
+    chapters have NULL ``number`` and are never matched. Returns None if not found.
+    """
     row = conn.execute(
         """
-        SELECT chapter_id, ordinal, title, micro_summary, summary, is_body
+        SELECT chapter_id, ordinal, number, title, micro_summary, summary, is_body
         FROM chapters
-        WHERE book_id = %s AND ordinal = %s
+        WHERE book_id = %s AND number = %s AND is_body
         """,
         (book_id, chapter_n),
     ).fetchone()
@@ -28,10 +35,11 @@ def get_chapter(
     return {
         "chapter_id": row[0],
         "ordinal": row[1],
-        "title": row[2],
-        "micro_summary": row[3],
-        "summary": row[4],
-        "is_body": row[5],
+        "number": row[2],
+        "title": row[3],
+        "micro_summary": row[4],
+        "summary": row[5],
+        "is_body": row[6],
     }
 
 
@@ -40,23 +48,31 @@ def get_chapter_summaries(
     book_id: uuid.UUID,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return in-scope body-chapter summaries ordered by ordinal.
 
     No keyword ranking: an abstract question rarely overlaps interpretive summary
     prose lexically, so the caller feeds the whole ordered outline to the LLM and
     lets it do the matching. ``is_body`` excludes non-body chapters (e.g. a table
-    of contents, whose summary is NULL). Honours *up_to_chapter* for spoiler scope.
+    of contents, whose summary is NULL). Honours *up_to_chapter* (spoiler ceiling)
+    and *chapter* (exact chapter). Scope predicates are on the display ``number``.
+
+    This queries the ``chapters`` row directly (not via an occurrence table), so it
+    uses direct ``number`` predicates rather than the shared IN-subquery helper.
     """
     scope_sql = ""
     named_params: dict = {"book_id": book_id}
     if up_to_chapter is not None:
-        scope_sql = "AND ordinal <= %(upto)s"
+        scope_sql += " AND number <= %(upto)s"
         named_params["upto"] = up_to_chapter
+    if chapter is not None:
+        scope_sql += " AND number = %(chapter)s"
+        named_params["chapter"] = chapter
 
     rows = conn.execute(
         f"""
-        SELECT ordinal, title, micro_summary, summary
+        SELECT ordinal, number, title, micro_summary, summary
         FROM chapters
         WHERE book_id = %(book_id)s
           AND is_body
@@ -67,7 +83,7 @@ def get_chapter_summaries(
     ).fetchall()
 
     return [
-        {"ordinal": r[0], "title": r[1], "micro_summary": r[2], "summary": r[3]}
+        {"ordinal": r[0], "number": r[1], "title": r[2], "micro_summary": r[3], "summary": r[4]}
         for r in rows
     ]
 
@@ -80,11 +96,12 @@ def lookup_entities(
     name: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return entities whose canonical name or any alias matches *name* (case-insensitive).
 
     Each result includes the entity metadata and a list of occurrence section_ids
-    within scope.
+    within scope (*up_to_chapter* ceiling and/or exact *chapter*, both on ``number``).
     """
     rows = conn.execute(
         """
@@ -101,18 +118,12 @@ def lookup_entities(
         (book_id, f"%{name}%", f"%{name}%"),
     ).fetchall()
 
+    scope_sql = chapter_scope_clause("o", up_to_chapter=up_to_chapter, chapter=chapter)
+    scope_params = chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter)
+
     results = []
     for entity_id, ename, etype, aliases in rows:
-        scope_sql = ""
-        occ_params: dict = {"book_id": book_id, "entity_id": entity_id}
-        if up_to_chapter is not None:
-            scope_sql = """
-                AND o.chapter_id IN (
-                    SELECT chapter_id FROM chapters
-                    WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-                )
-            """
-            occ_params["upto"] = up_to_chapter
+        occ_params: dict = {"book_id": book_id, "entity_id": entity_id, **scope_params}
 
         occ_rows = conn.execute(
             f"""
@@ -149,26 +160,21 @@ def lookup_dates(
     query: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Return date records whose raw_text contains *query* (case-insensitive).
 
     Also matches on ISO normalized_date when *query* looks like a year (4 digits).
+    Honours *up_to_chapter* (ceiling) and exact *chapter*, both on ``number``.
     """
-    scope_sql = ""
+    scope_sql = chapter_scope_clause("d", up_to_chapter=up_to_chapter, chapter=chapter)
     named_params: dict = {
         "book_id": book_id,
         "pat": f"%{query}%",
         "limit": limit,
+        **chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter),
     }
-    if up_to_chapter is not None:
-        scope_sql = """
-            AND d.chapter_id IN (
-                SELECT chapter_id FROM chapters
-                WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-            )
-        """
-        named_params["upto"] = up_to_chapter
 
     year_clause = ""
     if query.strip().isdigit() and len(query.strip()) == 4:
@@ -208,23 +214,20 @@ def lookup_events(
     query: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Return events whose description contains *query* (case-insensitive)."""
-    scope_sql = ""
+    """Return events whose description contains *query* (case-insensitive).
+
+    Honours *up_to_chapter* (ceiling) and exact *chapter*, both on ``number``.
+    """
+    scope_sql = chapter_scope_clause("ev", up_to_chapter=up_to_chapter, chapter=chapter)
     named_params: dict = {
         "book_id": book_id,
         "pat": f"%{query}%",
         "limit": limit,
+        **chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter),
     }
-    if up_to_chapter is not None:
-        scope_sql = """
-            AND ev.chapter_id IN (
-                SELECT chapter_id FROM chapters
-                WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-            )
-        """
-        named_params["upto"] = up_to_chapter
 
     rows = conn.execute(
         f"""

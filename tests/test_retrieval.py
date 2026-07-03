@@ -78,19 +78,19 @@ def db_book(request):
         (book_id,),
     )
 
-    # chapters
+    # chapters — `number` is the 1-based body-chapter display number (ordinal 0 → 1).
     ch0_id = conn.execute(
         """
-        INSERT INTO chapters (book_id, ordinal, title, is_body)
-        VALUES (%s, 0, 'Beginnings', TRUE) RETURNING chapter_id
+        INSERT INTO chapters (book_id, ordinal, number, title, is_body)
+        VALUES (%s, 0, 1, 'Beginnings', TRUE) RETURNING chapter_id
         """,
         (book_id,),
     ).fetchone()[0]
 
     ch1_id = conn.execute(
         """
-        INSERT INTO chapters (book_id, ordinal, title, is_body)
-        VALUES (%s, 1, 'Endings', TRUE) RETURNING chapter_id
+        INSERT INTO chapters (book_id, ordinal, number, title, is_body)
+        VALUES (%s, 1, 2, 'Endings', TRUE) RETURNING chapter_id
         """,
         (book_id,),
     ).fetchone()[0]
@@ -294,14 +294,22 @@ class TestLexicalSearch:
 
     def test_up_to_chapter_filters_scope(self, db_book):
         conn, book_id, ids = db_book
-        # Searching for "Bob" limited to chapter 0 should return nothing
-        results = lexical_search(conn, book_id, "Bob", up_to_chapter=0)
+        # Bob is in chapter 2; limiting to chapter 1 (number <= 1) returns nothing
+        results = lexical_search(conn, book_id, "Bob", up_to_chapter=1)
         assert ids["s2"] not in results
         assert ids["s3"] not in results
 
     def test_up_to_chapter_includes_correct_chapter(self, db_book):
         conn, book_id, ids = db_book
-        results = lexical_search(conn, book_id, "Bob", up_to_chapter=1)
+        results = lexical_search(conn, book_id, "Bob", up_to_chapter=2)
+        assert ids["s2"] in results or ids["s3"] in results
+
+    def test_exact_chapter_scopes_to_one_chapter(self, db_book):
+        conn, book_id, ids = db_book
+        # chapter=1 pins to the first body chapter (Alice); Bob's chapter is excluded.
+        results = lexical_search(conn, book_id, "Bob", chapter=1)
+        assert ids["s2"] not in results and ids["s3"] not in results
+        results = lexical_search(conn, book_id, "Bob", chapter=2)
         assert ids["s2"] in results or ids["s3"] in results
 
     def test_no_match_returns_empty(self, db_book):
@@ -335,8 +343,8 @@ class TestSemanticSearch:
 
     def test_up_to_chapter_scope(self, db_book):
         conn, book_id, ids = db_book
-        # Bob sections are in chapter 1; limiting to chapter 0 must exclude them
-        results = semantic_search(conn, book_id, _unit_vec(1), up_to_chapter=0)
+        # Bob sections are in chapter 2; limiting to chapter 1 must exclude them
+        results = semantic_search(conn, book_id, _unit_vec(1), up_to_chapter=1)
         assert ids["s2"] not in results
         assert ids["s3"] not in results
 
@@ -375,20 +383,23 @@ class TestExpandToSection:
 class TestGetChapter:
     def test_returns_chapter_metadata(self, db_book):
         conn, book_id, ids = db_book
-        ch = get_chapter(conn, book_id, 0)
+        # get_chapter is keyed on the display `number` (1-based), not `ordinal`.
+        ch = get_chapter(conn, book_id, 1)
         assert ch is not None
         assert ch["title"] == "Beginnings"
+        assert ch["number"] == 1
         assert ch["ordinal"] == 0
 
-    def test_wrong_ordinal_returns_none(self, db_book):
+    def test_wrong_number_returns_none(self, db_book):
         conn, book_id, ids = db_book
         assert get_chapter(conn, book_id, 99) is None
 
-    def test_chapter_1_accessible(self, db_book):
+    def test_second_chapter_accessible(self, db_book):
         conn, book_id, ids = db_book
-        ch = get_chapter(conn, book_id, 1)
+        ch = get_chapter(conn, book_id, 2)
         assert ch is not None
         assert ch["title"] == "Endings"
+        assert ch["number"] == 2
 
 
 class TestLookupEntities:
@@ -411,9 +422,16 @@ class TestLookupEntities:
 
     def test_up_to_chapter_scope_on_occurrences(self, db_book):
         conn, book_id, ids = db_book
-        # Alice is only in chapter 0, so up_to_chapter=0 should still find her
-        results = lookup_entities(conn, book_id, "Alice", up_to_chapter=0)
+        # Alice is only in chapter 1, so up_to_chapter=1 should still find her
+        results = lookup_entities(conn, book_id, "Alice", up_to_chapter=1)
         assert len(results) >= 1
+
+    def test_exact_chapter_scope_on_occurrences(self, db_book):
+        conn, book_id, ids = db_book
+        # Alice is only in chapter 1; scoping to chapter 2 drops her occurrences.
+        assert lookup_entities(conn, book_id, "Alice", chapter=1)[0]["occurrences"]
+        scoped = lookup_entities(conn, book_id, "Alice", chapter=2)
+        assert scoped == [] or scoped[0]["occurrences"] == []
 
     def test_unknown_entity_returns_empty(self, db_book):
         conn, book_id, ids = db_book
@@ -429,13 +447,13 @@ class TestLookupDates:
 
     def test_up_to_chapter_excludes_future_chapter(self, db_book):
         conn, book_id, ids = db_book
-        # 1984 date is in chapter 1; restricting to chapter 0 must return nothing
-        results = lookup_dates(conn, book_id, "1984", up_to_chapter=0)
+        # 1984 date is in chapter 2; restricting to chapter 1 must return nothing
+        results = lookup_dates(conn, book_id, "1984", up_to_chapter=1)
         assert results == []
 
     def test_up_to_chapter_includes_correct_chapter(self, db_book):
         conn, book_id, ids = db_book
-        results = lookup_dates(conn, book_id, "1984", up_to_chapter=1)
+        results = lookup_dates(conn, book_id, "1984", up_to_chapter=2)
         assert len(results) >= 1
 
     def test_no_match_returns_empty(self, db_book):
@@ -452,14 +470,14 @@ class TestLookupEvents:
 
     def test_up_to_chapter_scope(self, db_book):
         conn, book_id, ids = db_book
-        # rabbit-hole event is in chapter 0; chapter 0 scope should include it
-        results = lookup_events(conn, book_id, "rabbit", up_to_chapter=0)
+        # rabbit-hole event is in chapter 1; chapter 1 scope should include it
+        results = lookup_events(conn, book_id, "rabbit", up_to_chapter=1)
         assert len(results) >= 1
 
     def test_up_to_chapter_excludes_later_chapters(self, db_book):
         conn, book_id, ids = db_book
-        # If we restrict to chapter -1 (before any chapter), nothing should return
-        results = lookup_events(conn, book_id, "rabbit", up_to_chapter=-1)
+        # If we restrict to chapter 0 (before any body chapter), nothing should return
+        results = lookup_events(conn, book_id, "rabbit", up_to_chapter=0)
         assert results == []
 
     def test_no_match_returns_empty(self, db_book):
@@ -474,8 +492,8 @@ class TestScopeCrossCheck:
         conn, book_id, ids = db_book
         bob_sections = {ids["s2"], ids["s3"]}
 
-        lex = set(lexical_search(conn, book_id, "Bob", up_to_chapter=0))
-        sem = set(semantic_search(conn, book_id, _unit_vec(1), up_to_chapter=0))
+        lex = set(lexical_search(conn, book_id, "Bob", up_to_chapter=1))
+        sem = set(semantic_search(conn, book_id, _unit_vec(1), up_to_chapter=1))
 
-        assert lex.isdisjoint(bob_sections), "Lexical leaked chapter-1 section"
-        assert sem.isdisjoint(bob_sections), "Semantic leaked chapter-1 section"
+        assert lex.isdisjoint(bob_sections), "Lexical leaked chapter-2 section"
+        assert sem.isdisjoint(bob_sections), "Semantic leaked chapter-2 section"

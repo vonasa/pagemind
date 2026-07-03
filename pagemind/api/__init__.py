@@ -148,7 +148,7 @@ async def list_chapters(book_id: uuid.UUID) -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT chapter_id, ordinal, title, micro_summary, summary
+            SELECT chapter_id, ordinal, number, title, micro_summary, summary
             FROM chapters
             WHERE book_id = %s AND is_body
             ORDER BY ordinal
@@ -169,8 +169,9 @@ async def list_chapters(book_id: uuid.UUID) -> list[dict]:
         {
             "id": str(r[0]),
             "ordinal": r[1],
-            "title": r[2] or f"Chapter {r[1]}",
-            "micro_summary": r[3],
+            "number": r[2],
+            "title": r[3] or f"Chapter {r[2]}",
+            "micro_summary": r[4],
         }
         for r in rows
     ]
@@ -184,19 +185,20 @@ async def list_chapters(book_id: uuid.UUID) -> list[dict]:
 async def get_chapter_summary(chapter_id: uuid.UUID) -> dict:
     with _db() as conn:
         row = conn.execute(
-            "SELECT ordinal, title, summary, micro_summary FROM chapters WHERE chapter_id = %s",
+            "SELECT ordinal, number, title, summary, micro_summary FROM chapters WHERE chapter_id = %s",
             (chapter_id,),
         ).fetchone()
 
     if not row:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
-    ordinal, title, summary, micro_summary = row
+    ordinal, number, title, summary, micro_summary = row
     text = summary or micro_summary or "(No summary available for this chapter.)"
     return {
         "id": str(chapter_id),
         "ordinal": ordinal,
-        "title": title or f"Chapter {ordinal}",
+        "number": number,
+        "title": title or f"Chapter {number}",
         "summary": text,
     }
 
@@ -211,7 +213,7 @@ async def get_section(section_id: uuid.UUID) -> dict:
         row = conn.execute(
             """
             SELECT s.section_id, s.content, s.char_offset_start, s.char_offset_end,
-                   c.ordinal AS chapter_ordinal, c.title AS chapter_title
+                   c.number AS chapter_number, c.title AS chapter_title
             FROM sections s
             JOIN chapters c ON c.chapter_id = s.chapter_id
             WHERE s.section_id = %s
@@ -222,14 +224,14 @@ async def get_section(section_id: uuid.UUID) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="Section not found")
 
-    sid, content, offset_start, offset_end, ch_ordinal, ch_title = row
+    sid, content, offset_start, offset_end, ch_number, ch_title = row
     return {
         "id": str(sid),
         "content": content,
         "char_offset_start": offset_start,
         "char_offset_end": offset_end,
-        "chapter": ch_ordinal,
-        "chapter_title": ch_title or f"Chapter {ch_ordinal}",
+        "chapter": ch_number,
+        "chapter_title": ch_title or f"Chapter {ch_number}",
     }
 
 

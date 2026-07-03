@@ -152,7 +152,7 @@ export default function Overview() {
                       </span>
                       <span style={{ flex: 1, minWidth: 0 }}>
                         <span style={{ display: "block", fontFamily: "var(--font-display)", fontSize: 15, fontWeight: 600, color: "var(--text)" }}>
-                          Ch. {ch.ordinal} — {ch.title}
+                          Ch. {ch.number} — {ch.title}
                         </span>
                         {ch.micro_summary && (
                           <span style={{ display: "block", fontSize: 13, color: "var(--text-muted)", marginTop: 3, lineHeight: 1.5 }}>

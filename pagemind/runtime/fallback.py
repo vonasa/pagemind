@@ -37,14 +37,14 @@ def _build_outline(chapters: list[dict]) -> str:
     parts: list[str] = []
     used = 0
     for ch in chapters:
-        ordinal = ch["ordinal"]
-        title = ch.get("title") or f"Chapter {ordinal}"
+        number = ch["number"]
+        title = ch.get("title") or f"Chapter {number}"
         full = (ch.get("summary") or "").strip()
         micro = (ch.get("micro_summary") or "").strip()
         body = full if (full and used + len(full) <= _OUTLINE_BUDGET) else micro
         if not body:
             continue
-        parts.append(f"[Chapter {ordinal} — {title}]\n{body}")
+        parts.append(f"[Chapter {number} — {title}]\n{body}")
         used += len(body)
     return "\n\n".join(parts)
 
@@ -57,8 +57,18 @@ def _messages(question: str, grounded: bool, outline: str) -> list[dict]:
     ]
 
 
-def _no_summaries_result(original: QueryResult | None) -> QueryResult:
-    """When there are no summaries to consult, keep the recipe's own null text."""
+def _no_summaries_result(
+    original: QueryResult | None, chapter: int | None = None
+) -> QueryResult:
+    """When there are no summaries to consult, produce the right null text.
+
+    Under an exact-chapter scope, be explicit that nothing was found *in that chapter*
+    rather than silently widening to the whole book (see the zero-hit policy).
+    """
+    if chapter is not None:
+        return QueryResult(
+            text=f"No relevant passages found in chapter {chapter}.", weak=True
+        )
     if original is not None:
         return original
     return QueryResult(text="No relevant passages found for that question.", weak=True)
@@ -71,18 +81,20 @@ async def summary_fallback(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
     grounded: bool = True,
     original: QueryResult | None = None,
 ) -> QueryResult:
     """Answer *question* from the in-scope chapter-summary outline (non-streaming).
 
-    Returns *original* unchanged when the book has no summaries to consult, so a
-    dead-end never becomes an empty-evidence LLM call.
+    Under an exact *chapter* scope the outline is restricted to that chapter, so a
+    zero-hit recipe answer never silently widens to the whole book. Returns *original*
+    (or a chapter-specific null) when there are no summaries to consult.
     """
-    chapters = get_chapter_summaries(conn, book_id, up_to_chapter=up_to_chapter)
+    chapters = get_chapter_summaries(conn, book_id, up_to_chapter=up_to_chapter, chapter=chapter)
     outline = _build_outline(chapters)
     if not outline:
-        return _no_summaries_result(original)
+        return _no_summaries_result(original, chapter)
 
     text = await chat.complete(_messages(question, grounded, outline), max_tokens=_MAX_TOKENS)
     return build_output(book_id, question, text.strip(), [])
@@ -95,6 +107,7 @@ async def stream_summary_fallback(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
     grounded: bool = True,
     original: QueryResult | None = None,
 ) -> AsyncGenerator[tuple[str, object], None]:
@@ -102,10 +115,10 @@ async def stream_summary_fallback(
 
     The caller frames these into whatever transport it uses (SSE for the web API).
     """
-    chapters = get_chapter_summaries(conn, book_id, up_to_chapter=up_to_chapter)
+    chapters = get_chapter_summaries(conn, book_id, up_to_chapter=up_to_chapter, chapter=chapter)
     outline = _build_outline(chapters)
     if not outline:
-        yield ("done", _no_summaries_result(original))
+        yield ("done", _no_summaries_result(original, chapter))
         return
 
     full_text = ""

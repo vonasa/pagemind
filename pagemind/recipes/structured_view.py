@@ -181,6 +181,8 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,  # accepted for dispatch uniformity; a relationship map
+    # is inherently whole-book, so this recipe is not scoped to a single chapter.
 ) -> QueryResult:
     entities = _get_all_entities(conn, book_id)
     if not entities:

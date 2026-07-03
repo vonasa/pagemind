@@ -25,6 +25,7 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> QueryResult:
     # Read several top sections, not just the single best — thematic quote requests
     # ("quotes about passion") draw from passages scattered across the book. An
@@ -32,7 +33,9 @@ async def run(
     # floor of 5 keeps this recipe's long-standing default when no count is given.
     want, planned = plan_quotes(parse_requested_quote_count(question))
     n_sections = max(5, planned)
-    hits = await hybrid_search(conn, book_id, question, top_k=n_sections, up_to_chapter=up_to_chapter)
+    hits = await hybrid_search(
+        conn, book_id, question, top_k=n_sections, up_to_chapter=up_to_chapter, chapter=chapter
+    )
     section_ids = [sid for sid, _ in hits[:n_sections]]
     if not section_ids:
         return _build_output(book_id, question, format_quote_answer(0), [])
