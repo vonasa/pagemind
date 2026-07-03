@@ -42,8 +42,11 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> QueryResult:
-    chapter_n = _parse_chapter_number(question)
+    # Prefer the strict chapter reference the orchestrator already parsed; fall back
+    # to this recipe's own looser parse (which also accepts a bare digit).
+    chapter_n = chapter if chapter is not None else _parse_chapter_number(question)
     if chapter_n is None:
         return QueryResult(
             text="Could not determine which chapter to summarize. "

@@ -42,7 +42,12 @@ async def dispatch(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> QueryResult:
-    """Run named recipe; fall back to generic_fallback on unknown name."""
+    """Run named recipe; fall back to generic_fallback on unknown name.
+
+    *up_to_chapter* (spoiler ceiling) and *chapter* (exact chapter to scope to) are
+    forwarded uniformly to every recipe; recipes that don't scope simply ignore them.
+    """
     fn = _REGISTRY.get(recipe, generic_fallback.run)
-    return await fn(conn, chat, book_id, question, up_to_chapter=up_to_chapter)
+    return await fn(conn, chat, book_id, question, up_to_chapter=up_to_chapter, chapter=chapter)

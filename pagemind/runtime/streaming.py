@@ -15,6 +15,7 @@ from pagemind.runtime.history import condense_question
 from pagemind.runtime.quotes import parse_requested_quote_count, plan_quotes, select_quotes
 from pagemind.runtime.reader import fan_out
 from pagemind.runtime.router import route
+from pagemind.runtime.scope import parse_chapter_reference
 from pagemind.runtime.synthesizer import answer_prompts as _answer_prompts, format_evidence as _format_evidence, build_output as _build_output
 from pagemind.runtime.types import QueryResult
 
@@ -61,12 +62,13 @@ async def _emit_fallback(
     up_to_chapter: int | None,
     grounded: bool,
     original: QueryResult | None,
+    chapter: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream the summaries-only fallback as SSE token/done events."""
     yield _sse({"type": "step", "text": "Consulting chapter summaries…"})
     async for kind, payload in stream_summary_fallback(
         conn, chat, book_id, question,
-        up_to_chapter=up_to_chapter, grounded=grounded, original=original,
+        up_to_chapter=up_to_chapter, chapter=chapter, grounded=grounded, original=original,
     ):
         if kind == "token":
             yield _sse({"type": "token", "text": payload})
@@ -104,6 +106,10 @@ async def ask_stream(
         else:
             search_question = question
 
+        # An explicit "chapter N" pins retrieval to that chapter's display number.
+        # Parse both the condensed and raw text — condensing may drop the reference.
+        chapter = parse_chapter_reference(search_question) or parse_chapter_reference(question)
+
         yield _sse({"type": "step", "text": "Routing question…"})
         recipe = await route(chat, search_question)
 
@@ -113,12 +119,17 @@ async def ask_stream(
             step = "Reading the key scenes…" if recipe == "structured_view" else "Looking up…"
             yield _sse({"type": "step", "text": step})
             from pagemind.recipes import dispatch
-            result = await dispatch(recipe, conn, chat, book_id, search_question, up_to_chapter=up_to_chapter)
+            result = await dispatch(
+                recipe, conn, chat, book_id, search_question,
+                up_to_chapter=up_to_chapter, chapter=chapter,
+            )
             if result.weak:
-                # Structured lookup found nothing usable — answer from summaries.
+                # Structured lookup found nothing usable — answer from summaries
+                # (scoped to *chapter* when set, never widening to the whole book).
                 async for ev in _emit_fallback(
                     conn, chat, book_id, search_question,
                     up_to_chapter=up_to_chapter, grounded=grounded, original=result,
+                    chapter=chapter,
                 ):
                     yield ev
                 return
@@ -138,15 +149,20 @@ async def ask_stream(
         want, n_sections = plan_quotes(requested)
 
         yield _sse({"type": "step", "text": "Searching passages…"})
-        hits = await hybrid_search(conn, book_id, search_question, top_k=max(5, n_sections), up_to_chapter=up_to_chapter)
+        hits = await hybrid_search(
+            conn, book_id, search_question, top_k=max(5, n_sections),
+            up_to_chapter=up_to_chapter, chapter=chapter,
+        )
         section_ids = [sid for sid, _ in hits[:n_sections]]
 
         if not section_ids:
-            # No passages matched — answer from the chapter summaries instead.
+            # No passages matched — answer from the chapter summaries instead
+            # (scoped to *chapter* when set, never widening to the whole book).
             original = QueryResult(text="No relevant passages found for that question.", weak=True)
             async for ev in _emit_fallback(
                 conn, chat, book_id, search_question,
                 up_to_chapter=up_to_chapter, grounded=grounded, original=original,
+                chapter=chapter,
             ):
                 yield ev
             return
@@ -159,11 +175,13 @@ async def ask_stream(
         yield _sse({"type": "step", "text": "Writing answer…"})
 
         if not results:
-            # Readers surfaced nothing usable — answer from the chapter summaries.
+            # Readers surfaced nothing usable — answer from the chapter summaries
+            # (scoped to *chapter* when set, never widening to the whole book).
             original = QueryResult(text="No relevant passages found.", weak=True)
             async for ev in _emit_fallback(
                 conn, chat, book_id, search_question,
                 up_to_chapter=up_to_chapter, grounded=grounded, original=original,
+                chapter=chapter,
             ):
                 yield ev
             return

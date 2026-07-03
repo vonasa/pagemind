@@ -21,8 +21,11 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> QueryResult:
-    hits = await hybrid_search(conn, book_id, question, top_k=5, up_to_chapter=up_to_chapter)
+    hits = await hybrid_search(
+        conn, book_id, question, top_k=5, up_to_chapter=up_to_chapter, chapter=chapter
+    )
     section_ids = [sid for sid, _ in hits[:_TOP_SECTIONS]]
     if not section_ids:
         return QueryResult(

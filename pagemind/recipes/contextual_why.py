@@ -59,6 +59,9 @@ async def run(
     question: str,
     *,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,  # accepted for dispatch uniformity; this recipe is
+    # forward-looking (it scans chapters *after* the anchor), so it is not scoped to a
+    # single chapter — see the scope policy in the plan.
 ) -> QueryResult:
     # ── Stage 1: anchor ────────────────────────────────────────────────────────
     hits = await hybrid_search(conn, book_id, question, top_k=3, up_to_chapter=up_to_chapter)

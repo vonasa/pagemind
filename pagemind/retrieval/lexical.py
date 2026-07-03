@@ -6,6 +6,8 @@ import uuid
 
 import psycopg
 
+from pagemind.retrieval.scope import chapter_scope_clause, chapter_scope_params
+
 # ── Soft-nudge detection ──────────────────────────────────────────────────────
 
 _QUOTED_RE = re.compile(r'"[^"]+"')
@@ -44,39 +46,39 @@ def lexical_search(
     *,
     top_k: int = 20,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[uuid.UUID]:
     """Return up to *top_k* section_ids ranked by ts_rank against *query*.
 
-    Accepts an optional *up_to_chapter* ordinal: only sections whose chapter
-    has ordinal <= that value are returned (plumbing for spoiler-safe reads).
+    Scope (both on the display ``number``): *up_to_chapter* is a spoiler ceiling,
+    *chapter* pins one exact chapter. Non-body sections are excluded — their chapter
+    has no ``number`` and the table of contents should never be cited — via a join to
+    ``sections`` (``sections_fts`` carries no ``is_body`` column).
     """
-    scope_sql = ""
-    params: list = [query, book_id]
-
-    if up_to_chapter is not None:
-        scope_sql = """
-            AND sf.chapter_id IN (
-                SELECT chapter_id FROM chapters
-                WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-            )
-        """
+    scope_sql = chapter_scope_clause("sf", up_to_chapter=up_to_chapter, chapter=chapter)
 
     sql = f"""
         WITH tsq AS (
             SELECT websearch_to_tsquery('english', %(query)s) AS q
         )
         SELECT sf.section_id
-        FROM sections_fts sf, tsq
+        FROM sections_fts sf
+        JOIN sections s ON s.section_id = sf.section_id
+        CROSS JOIN tsq
         WHERE sf.book_id = %(book_id)s
+          AND s.is_body
           AND sf.fts_vector @@ tsq.q
           {scope_sql}
         ORDER BY ts_rank(sf.fts_vector, tsq.q) DESC
         LIMIT %(top_k)s
     """
 
-    named_params: dict = {"query": query, "book_id": book_id, "top_k": top_k}
-    if up_to_chapter is not None:
-        named_params["upto"] = up_to_chapter
+    named_params: dict = {
+        "query": query,
+        "book_id": book_id,
+        "top_k": top_k,
+        **chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter),
+    }
 
     rows = conn.execute(sql, named_params).fetchall()
     return [r[0] for r in rows]
@@ -89,26 +91,24 @@ def date_section_ids(
     *,
     top_k: int = 10,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[uuid.UUID]:
     """Return section_ids from the dates table whose raw_text matches *query* tokens.
 
-    Used as a soft boost when the query looks date-like.
+    Used as a soft boost when the query looks date-like. Honours *up_to_chapter*
+    (ceiling) and exact *chapter*, both on the display ``number``.
     """
     # Extract all tokens from the query that look like years or month names
     tokens = _DATE_RE.findall(query)
     if not tokens:
         return []
 
-    scope_sql = ""
-    named_params: dict = {"book_id": book_id, "top_k": top_k}
-    if up_to_chapter is not None:
-        scope_sql = """
-            AND d.chapter_id IN (
-                SELECT chapter_id FROM chapters
-                WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-            )
-        """
-        named_params["upto"] = up_to_chapter
+    scope_sql = chapter_scope_clause("d", up_to_chapter=up_to_chapter, chapter=chapter)
+    named_params: dict = {
+        "book_id": book_id,
+        "top_k": top_k,
+        **chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter),
+    }
 
     # Build ILIKE conditions for each token
     conditions = " OR ".join(

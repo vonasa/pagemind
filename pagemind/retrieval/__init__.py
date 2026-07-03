@@ -45,6 +45,7 @@ async def hybrid_search(
     *,
     top_k: int = 10,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[tuple[uuid.UUID, float]]:
     """Hybrid retrieval: lexical + semantic fused with RRF, with soft nudges.
 
@@ -54,20 +55,21 @@ async def hybrid_search(
       - Capitalized/quoted tokens → boost lexical weight in RRF.
       - Date-like tokens          → add a third ranked list from the dates index.
 
-    The *up_to_chapter* ordinal gates all three sub-queries identically; callers
-    can leave it None (default) to search the whole book.
+    Scope gates all sub-queries identically (both on the display ``number``):
+    *up_to_chapter* is a spoiler ceiling, *chapter* pins one exact chapter. Leave
+    both None (default) to search the whole book.
     """
     nudges = detect_nudges(query)
 
     # Lexical and semantic run independently; no dependency between them.
     lex_ids = lexical_search(
-        conn, book_id, query, top_k=top_k * 2, up_to_chapter=up_to_chapter
+        conn, book_id, query, top_k=top_k * 2, up_to_chapter=up_to_chapter, chapter=chapter
     )
 
     client = EmbeddingsClient.from_config()
     query_vec = await client.embed_one(query)
     sem_ids = semantic_search(
-        conn, book_id, query_vec, top_k=top_k * 2, up_to_chapter=up_to_chapter
+        conn, book_id, query_vec, top_k=top_k * 2, up_to_chapter=up_to_chapter, chapter=chapter
     )
 
     lex_weight = _BOOSTED_LEX_WEIGHT if nudges["boost_lexical"] else _DEFAULT_LEX_WEIGHT
@@ -76,7 +78,7 @@ async def hybrid_search(
 
     if nudges["boost_date"]:
         date_ids = date_section_ids(
-            conn, book_id, query, top_k=top_k, up_to_chapter=up_to_chapter
+            conn, book_id, query, top_k=top_k, up_to_chapter=up_to_chapter, chapter=chapter
         )
         if date_ids:
             ranked_lists.append(date_ids)

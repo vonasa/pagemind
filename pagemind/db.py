@@ -72,16 +72,24 @@ def store_segments(
     result: SegmentResult,
 ) -> None:
     """Insert chapters, sections, and chunks within the current transaction."""
-    # 1. Chapters → collect chapter_id per ordinal
+    # 1. Chapters → collect chapter_id per ordinal.
+    #    `number` is the 1-based position among BODY chapters only (the human-facing
+    #    chapter number shown in the UI and referenced in chat); NULL for non-body.
     chapter_id_map: dict[int, uuid.UUID] = {}
+    body_number = 0
     for ch in result.chapters:
+        if ch.is_body:
+            body_number += 1
+            number = body_number
+        else:
+            number = None
         row = conn.execute(
             """
-            INSERT INTO chapters (book_id, ordinal, title, is_body)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO chapters (book_id, ordinal, number, title, is_body)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING chapter_id
             """,
-            (book_id, ch.ordinal, ch.title, ch.is_body),
+            (book_id, ch.ordinal, number, ch.title, ch.is_body),
         ).fetchone()
         chapter_id_map[ch.ordinal] = row[0]
 

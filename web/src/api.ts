@@ -12,6 +12,9 @@ export interface Book {
 export interface Chapter {
   id: string;
   ordinal: number;
+  // 1-based position among body chapters — the number shown to the user and used
+  // when referencing a chapter in chat. `ordinal` is the internal storage index.
+  number: number;
   title: string;
   micro_summary: string | null;
 }
@@ -19,6 +22,7 @@ export interface Chapter {
 export interface ChapterSummary {
   id: string;
   ordinal: number;
+  number: number;
   title: string;
   summary: string;
 }

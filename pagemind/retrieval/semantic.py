@@ -5,6 +5,8 @@ import uuid
 
 import psycopg
 
+from pagemind.retrieval.scope import chapter_scope_clause, chapter_scope_params
+
 
 def _vec_to_pg(vec: list[float]) -> str:
     return "[" + ",".join(f"{v:.8g}" for v in vec) + "]"
@@ -17,30 +19,24 @@ def semantic_search(
     *,
     top_k: int = 20,
     up_to_chapter: int | None = None,
+    chapter: int | None = None,
 ) -> list[uuid.UUID]:
     """Return up to *top_k* section_ids ranked by cosine similarity.
 
     Retrieves chunks via HNSW, then maps each chunk to its parent section,
     keeping the minimum distance per section (best-matching chunk wins).
     Fetches *top_k * 4* chunks internally to ensure enough unique sections
-    survive the deduplication step.
+    survive the deduplication step. Scope (both on the display ``number``):
+    *up_to_chapter* is a spoiler ceiling, *chapter* pins one exact chapter.
     """
-    scope_sql = ""
+    scope_sql = chapter_scope_clause("c", up_to_chapter=up_to_chapter, chapter=chapter)
     named_params: dict = {
         "vec": _vec_to_pg(query_vec),
         "book_id": book_id,
         "inner_k": top_k * 4,
         "top_k": top_k,
+        **chapter_scope_params(up_to_chapter=up_to_chapter, chapter=chapter),
     }
-
-    if up_to_chapter is not None:
-        scope_sql = """
-            AND c.chapter_id IN (
-                SELECT chapter_id FROM chapters
-                WHERE book_id = %(book_id)s AND ordinal <= %(upto)s
-            )
-        """
-        named_params["upto"] = up_to_chapter
 
     sql = f"""
         WITH ranked_chunks AS (

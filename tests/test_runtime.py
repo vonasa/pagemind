@@ -65,8 +65,8 @@ def db_book(request):
 
     ch0_id = conn.execute(
         """
-        INSERT INTO chapters (book_id, ordinal, title, is_body, summary, micro_summary)
-        VALUES (%s, 0, 'Beginnings', TRUE,
+        INSERT INTO chapters (book_id, ordinal, number, title, is_body, summary, micro_summary)
+        VALUES (%s, 0, 1, 'Beginnings', TRUE,
                 'Alice falls into Wonderland and meets strange creatures.',
                 'Alice enters Wonderland.')
         RETURNING chapter_id
@@ -76,8 +76,8 @@ def db_book(request):
 
     ch1_id = conn.execute(
         """
-        INSERT INTO chapters (book_id, ordinal, title, is_body, summary, micro_summary)
-        VALUES (%s, 1, 'Endings', TRUE,
+        INSERT INTO chapters (book_id, ordinal, number, title, is_body, summary, micro_summary)
+        VALUES (%s, 1, 2, 'Endings', TRUE,
                 'Bob discovers the future and returns changed.',
                 'Bob finds the future.')
         RETURNING chapter_id
@@ -469,7 +469,7 @@ class TestOrchestrator:
         async def mock_route(chat, question):
             return "generic_fallback"
 
-        async def mock_dispatch(recipe, conn, chat, book_id, question, *, up_to_chapter=None):
+        async def mock_dispatch(recipe, conn, chat, book_id, question, *, up_to_chapter=None, chapter=None):
             return expected
 
         orig_route = orch_mod.route
@@ -486,6 +486,25 @@ class TestOrchestrator:
 
 
 # ── Recipe: chapter_summary ───────────────────────────────────────────────────
+
+class TestParseChapterReference:
+    """The strict scope parser used by the orchestrators (no bare-digit fallback)."""
+
+    def test_matches_explicit_chapter(self):
+        from pagemind.runtime.scope import parse_chapter_reference
+        assert parse_chapter_reference("what character appears in chapter 3") == 3
+        assert parse_chapter_reference("summarize chapter 7") == 7
+        assert parse_chapter_reference("ch. 12 please") == 12
+        assert parse_chapter_reference("the third chapter") == 3
+        assert parse_chapter_reference("chapter the second") == 2
+
+    def test_ignores_bare_numbers(self):
+        from pagemind.runtime.scope import parse_chapter_reference
+        # Counts and years must NOT be read as a chapter scope.
+        assert parse_chapter_reference("3 quotes about war") is None
+        assert parse_chapter_reference("who dies in 1984") is None
+        assert parse_chapter_reference("tell me about the book") is None
+
 
 class TestChapterSummaryRecipe:
     from pagemind.recipes.chapter_summary import _parse_chapter_number
@@ -506,7 +525,8 @@ class TestChapterSummaryRecipe:
         from pagemind.recipes.chapter_summary import run
         conn, book_id, ids = db_book
         chat = _mock_chat("unused")
-        result = await run(conn, chat, book_id, "summarize chapter 0")
+        # get_chapter is keyed on the display number; chapter 1 is the first body chapter.
+        result = await run(conn, chat, book_id, "summarize chapter 1")
         assert "Alice" in result.text or "Wonderland" in result.text
         assert result.weak is False  # a real summary is not a dead end
 
@@ -769,7 +789,7 @@ class TestContextualWhyRecipe:
         chat.complete = AsyncMock(side_effect=mock_complete)
 
         call_n = [0]
-        async def mock_hybrid(conn, book_id, question, *, top_k=10, up_to_chapter=None):
+        async def mock_hybrid(conn, book_id, question, *, top_k=10, up_to_chapter=None, chapter=None):
             call_n[0] += 1
             # First call: anchor in ch0; second call: return ch1 section for forward scan
             if call_n[0] == 1:
@@ -782,9 +802,10 @@ class TestContextualWhyRecipe:
             result = await cw_mod.run(conn, chat, book_id, "why is Alice so curious?")
             assert isinstance(result, QueryResult)
             assert result.text
-            # Both hops cite: anchor (s0, ch0) and at least one forward section (ch1)
+            # Both hops cite: anchor (s0, chapter number 1) and at least one forward
+            # section (chapter number 2). Citations now carry the display number.
             cited_chapters = {c.chapter for c in result.citations}
-            assert 0 in cited_chapters  # anchor hop
+            assert 1 in cited_chapters  # anchor hop
         finally:
             cw_mod.hybrid_search = orig_hybrid
 
@@ -807,7 +828,7 @@ class TestContextualWhyRecipe:
 class TestOutputSeam:
     """Verify that all recipe run() functions return a QueryResult instance."""
 
-    async def _fake_result(self, conn, chat, book_id, question, *, up_to_chapter=None):
+    async def _fake_result(self, conn, chat, book_id, question, *, up_to_chapter=None, chapter=None):
         return QueryResult(text="test")
 
     async def test_generic_fallback_output_type(self, db_book):
@@ -933,7 +954,7 @@ class TestAskStreamWiring:
             captured["route_q"] = q
             return "generic_fallback"  # search-based path
 
-        async def fake_hybrid(conn, book_id, q, *, top_k=5, up_to_chapter=None):
+        async def fake_hybrid(conn, book_id, q, *, top_k=5, up_to_chapter=None, chapter=None):
             captured["hybrid_q"] = q
             return [(uuid.uuid4(), 1.0), (uuid.uuid4(), 0.9)]
 
@@ -1104,7 +1125,7 @@ class TestQuoteCountWiring:
         async def fake_route(chat, q):
             return "verbatim_quote"  # a search-path recipe
 
-        async def fake_hybrid(conn, book_id, q, *, top_k=5, up_to_chapter=None):
+        async def fake_hybrid(conn, book_id, q, *, top_k=5, up_to_chapter=None, chapter=None):
             captured["top_k"] = top_k
             return [(uuid.uuid4(), 1.0 - i * 0.01) for i in range(top_k)]
 
@@ -1147,28 +1168,36 @@ class TestGetChapterSummaries:
         from pagemind.retrieval.structured import get_chapter_summaries
         conn, book_id, _ = db_book
         rows = get_chapter_summaries(conn, book_id)
-        assert [r["ordinal"] for r in rows] == [0, 1]
+        assert [r["number"] for r in rows] == [1, 2]
         assert "Alice" in rows[0]["summary"]
 
     async def test_respects_up_to_chapter(self, db_book):
         from pagemind.retrieval.structured import get_chapter_summaries
         conn, book_id, _ = db_book
-        rows = get_chapter_summaries(conn, book_id, up_to_chapter=0)
-        assert [r["ordinal"] for r in rows] == [0]
+        # up_to_chapter is on the display number (1-based): <= 1 keeps only chapter 1.
+        rows = get_chapter_summaries(conn, book_id, up_to_chapter=1)
+        assert [r["number"] for r in rows] == [1]
+
+    async def test_respects_exact_chapter(self, db_book):
+        from pagemind.retrieval.structured import get_chapter_summaries
+        conn, book_id, _ = db_book
+        rows = get_chapter_summaries(conn, book_id, chapter=2)
+        assert [r["number"] for r in rows] == [2]
 
     async def test_excludes_non_body_chapters(self, db_book):
         from pagemind.retrieval.structured import get_chapter_summaries
         conn, book_id, _ = db_book
+        # Non-body chapters carry a NULL number and are excluded.
         conn.execute(
             """
-            INSERT INTO chapters (book_id, ordinal, title, is_body, summary, micro_summary)
-            VALUES (%s, 2, 'CONTENTS', FALSE, NULL, NULL)
+            INSERT INTO chapters (book_id, ordinal, number, title, is_body, summary, micro_summary)
+            VALUES (%s, 2, NULL, 'CONTENTS', FALSE, NULL, NULL)
             """,
             (book_id,),
         )
         conn.commit()
         rows = get_chapter_summaries(conn, book_id)
-        assert [r["ordinal"] for r in rows] == [0, 1]  # non-body row excluded
+        assert [r["number"] for r in rows] == [1, 2]  # non-body row excluded
 
 
 class TestSynthesizeWeak:
@@ -1195,7 +1224,7 @@ class TestSummaryFallbackModule:
     def test_build_outline_budget(self):
         from pagemind.runtime.fallback import _build_outline, _OUTLINE_BUDGET
         chapters = [
-            {"ordinal": i, "title": f"C{i}",
+            {"ordinal": i, "number": i + 1, "title": f"C{i}",
              "summary": "x" * 5000, "micro_summary": "short micro"}
             for i in range(3)
         ]
@@ -1245,11 +1274,11 @@ class TestWeakTriggersFallback:
         async def mock_route(chat, question):
             return "locate_entity"
 
-        async def mock_dispatch(recipe, conn, chat, book_id, question, *, up_to_chapter=None):
+        async def mock_dispatch(recipe, conn, chat, book_id, question, *, up_to_chapter=None, chapter=None):
             return QueryResult(text="Ghost (PERSON): 0 occurrence(s)", weak=True)
 
         async def mock_fallback(conn, chat, book_id, question, *, up_to_chapter=None,
-                                grounded=True, original=None):
+                                chapter=None, grounded=True, original=None):
             return sentinel
 
         orig = (orch_mod.route, orch_mod.dispatch, orch_mod.summary_fallback)
@@ -1268,11 +1297,11 @@ class TestWeakTriggersFallback:
         async def fake_route(chat, q):
             return "locate_entity"  # a _NON_SEARCH recipe
 
-        async def fake_dispatch(recipe, conn, chat, book_id, q, *, up_to_chapter=None):
+        async def fake_dispatch(recipe, conn, chat, book_id, q, *, up_to_chapter=None, chapter=None):
             return QueryResult(text="Ghost (PERSON): 0 occurrence(s)", weak=True)
 
         async def fake_stream_fallback(conn, chat, book_id, q, *, up_to_chapter=None,
-                                       grounded=True, original=None):
+                                       chapter=None, grounded=True, original=None):
             yield ("token", "from the summary")
             yield ("done", QueryResult(text="from the summary"))
 
